@@ -1,0 +1,484 @@
+{
+  "info": {
+    "name": "Digi-Khata Sales & Inventory API",
+    "description": "Complete API collection for sales and inventory management system",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Inventory Management",
+      "item": [
+        {
+          "name": "List All Items",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/inventory?page=1&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["api", "inventory"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "q",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "active",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create New Item",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Laptop\",\n  \"category\": \"Electronics\",\n  \"description\": \"High-performance laptop\",\n  \"currentStock\": 20,\n  \"reorderLevel\": 5,\n  \"unitOfMeasure\": \"piece\",\n  \"purchasePrice\": 600,\n  \"sellingPrice\": 900,\n  \"status\": \"active\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/inventory",
+              "host": ["{{base_url}}"],
+              "path": ["api", "inventory"]
+            }
+          }
+        },
+        {
+          "name": "Get Single Item",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/inventory/{{item_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "inventory", "{{item_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Update Item",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated Laptop\",\n  \"sellingPrice\": 950,\n  \"reorderLevel\": 10\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/inventory/{{item_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "inventory", "{{item_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Adjust Stock",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"adjustment\": 50,\n  \"reason\": \"Stock received from supplier\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/inventory/{{item_id}}/adjust-stock",
+              "host": ["{{base_url}}"],
+              "path": ["api", "inventory", "{{item_id}}", "adjust-stock"]
+            }
+          }
+        },
+        {
+          "name": "Get Low Stock Alerts",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/inventory/alerts/low-stock",
+              "host": ["{{base_url}}"],
+              "path": ["api", "inventory", "alerts", "low-stock"]
+            }
+          }
+        },
+        {
+          "name": "Get Inventory Statistics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/inventory/analytics/stats",
+              "host": ["{{base_url}}"],
+              "path": ["api", "inventory", "analytics", "stats"]
+            }
+          }
+        },
+        {
+          "name": "Delete Item",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/inventory/{{item_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "inventory", "{{item_id}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sales & Invoices",
+      "item": [
+        {
+          "name": "Create Sales Invoice",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"itemId\": \"{{item_id_1}}\",\n      \"quantity\": 2,\n      \"unitPrice\": 900\n    },\n    {\n      \"itemId\": \"{{item_id_2}}\",\n      \"quantity\": 5,\n      \"unitPrice\": 150\n    }\n  ],\n  \"customer\": \"{{customer_id}}\",\n  \"paymentMethod\": \"credit\",\n  \"discount\": 100,\n  \"discountPercentage\": 0,\n  \"tax\": 150,\n  \"taxPercentage\": 5,\n  \"notes\": \"Corporate order\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/sales-invoices",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sales-invoices"]
+            }
+          }
+        },
+        {
+          "name": "List Sales Invoices",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/sales-invoices?page=1&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sales-invoices"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "q",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Single Invoice",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/sales-invoices/{{invoice_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sales-invoices", "{{invoice_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Update Invoice",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"received\": 5000,\n  \"status\": \"paid\",\n  \"notes\": \"Payment received in full\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/sales-invoices/{{invoice_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sales-invoices", "{{invoice_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Delete Invoice",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/sales-invoices/{{invoice_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sales-invoices", "{{invoice_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Get Item Sales Statistics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/sales-invoices/items/{{item_id}}/stats",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sales-invoices", "items", "{{item_id}}", "stats"]
+            }
+          }
+        },
+        {
+          "name": "Get All Items Sales Statistics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/sales-invoices/items/stats/all",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sales-invoices", "items", "stats", "all"]
+            }
+          }
+        },
+        {
+          "name": "Get Sales Dashboard Metrics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/sales-invoices/metrics/dashboard",
+              "host": ["{{base_url}}"],
+              "path": ["api", "sales-invoices", "metrics", "dashboard"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Customers",
+      "item": [
+        {
+          "name": "List Customers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/customers?page=1&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["api", "customers"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create Customer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"John Doe\",\n  \"contact\": \"john@example.com\",\n  \"status\": \"active\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/customers",
+              "host": ["{{base_url}}"],
+              "path": ["api", "customers"]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:5000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "item_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "item_id_1",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "item_id_2",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "customer_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "invoice_id",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}
