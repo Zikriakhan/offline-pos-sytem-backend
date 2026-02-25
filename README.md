@@ -5,6 +5,8 @@ Item Details	Category	Current Stock	Reorder Level	Purchase Price	Selling Price	S
 Express + MongoDB backend API following MVC pattern with complete multi-user data isolation.
 
 ## 🔐 Multi-User Architecture
+NBrPykOstBhROzbx
+muhammadjanzikria_db_user
 
 This system provides complete data isolation between users:
 - **User Authentication**: JWT-based login system
@@ -432,3 +434,6 @@ curl -X POST http://localhost:5000/api/sales-invoices \
     "taxPercentage": 5,
     "notes": "Corporate order"
   }'
+12837_db_user
+PwQI8lbqtLfxkfC6
+mongodb+srv://12837_db_user:PwQI8lbqtLfxkfC6@cluster0.728vmtb.mongodb.net/

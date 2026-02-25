@@ -1,15 +1,15 @@
 const dotenv = require('dotenv');
 dotenv.config();
 
-const app = require('./src/app');
-const connectDB = require('./src/config/db');
+const app = require('./app');
+const connectDB = require('./config/db');
 
-const PORT = process.env.PORT || 5000;
+const DEFAULT_PORT = 5001;
+const configuredPort = Number(process.env.PORT) || DEFAULT_PORT;
 
-connectDB()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+const startServer = (port, attemptsLeft = 5) => {
+  const server = app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
       console.log("==================================");
 
       console.log("AUTH APIs:");
@@ -75,8 +75,23 @@ connectDB()
       console.log("GET    /api/showalldata/all     (All users data - Admin only)");
 
       console.log("==================================");
-    });
-   
+  });
+
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE' && attemptsLeft > 0) {
+      console.error(`Port ${port} in use, trying ${port + 1} (attempts left: ${attemptsLeft - 1})`);
+      // try next port
+      startServer(port + 1, attemptsLeft - 1);
+    } else {
+      console.error('Failed to start server:', err);
+      process.exit(1);
+    }
+  });
+};
+
+connectDB()
+  .then(() => {
+    startServer(configuredPort);
   })
   .catch((err) => {
     console.error('Failed to start server:', err);
