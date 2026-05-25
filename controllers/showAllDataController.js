@@ -5,13 +5,13 @@ const Supplier = require('../models/Supplier');
 const PurchaseOrder = require('../models/PurchaseOrder');
 const SalesInvoice = require('../models/SalesInvoice');
 const Expense = require('../models/Expense');
-
-const isAdmin = (req) => req.user && req.user.role === 'admin';
+const { buildOwnerFilter } = require('../utils/tenantScope');
 
 // Get all data for current user in nested structure
 exports.getCurrentUserAllData = async (req, res, next) => {
   try {
     const userId = req.user.id;
+    const ownerFilter = await buildOwnerFilter(req);
     
     // Get user info
     const user = await User.findById(userId).select('-password');
@@ -21,12 +21,12 @@ exports.getCurrentUserAllData = async (req, res, next) => {
 
     // Get all user data
     const [customers, inventory, suppliers, purchaseOrders, salesInvoices, expenses] = await Promise.all([
-      Customer.find({ owner: userId }),
-      InventoryItem.find({ owner: userId }),
-      Supplier.find({ owner: userId }),
-      PurchaseOrder.find({ owner: userId }).lean(),
-      SalesInvoice.find({ owner: userId }).lean(),
-      Expense.find({ owner: userId })
+      Customer.find(ownerFilter),
+      InventoryItem.find(ownerFilter),
+      Supplier.find(ownerFilter),
+      PurchaseOrder.find(ownerFilter).lean(),
+      SalesInvoice.find(ownerFilter).lean(),
+      Expense.find(ownerFilter)
     ]);
 
     // Manually populate supplier names for purchase orders
@@ -35,7 +35,7 @@ exports.getCurrentUserAllData = async (req, res, next) => {
       
       if (po.supplier && po.supplier.toString()) {
         try {
-          const supplier = await Supplier.findById(po.supplier);
+          const supplier = await Supplier.findOne({ _id: po.supplier, ...(await buildOwnerFilter(req)) });
           if (supplier) {
             supplierName = supplier.name;
           }
@@ -56,7 +56,7 @@ exports.getCurrentUserAllData = async (req, res, next) => {
       
       if (sale.customer && sale.customer.toString()) {
         try {
-          const customer = await Customer.findById(sale.customer);
+          const customer = await Customer.findOne({ _id: sale.customer, ...(await buildOwnerFilter(req)) });
           if (customer) {
             customerName = customer.name;
           }
@@ -123,9 +123,9 @@ exports.getCurrentUserAllData = async (req, res, next) => {
 // Get all users with their complete data (Admin only)
 exports.getAllUsersWithData = async (req, res, next) => {
   try {
-    if (!isAdmin(req)) {
-      return res.status(403).json({ message: 'Admin access required' });
-    }
+    return res.status(403).json({
+      message: 'Cross-tenant data access is disabled by policy for multi-user data isolation'
+    });
 
     // Get all users
     const users = await User.find().select('-password');
@@ -148,7 +148,7 @@ exports.getAllUsersWithData = async (req, res, next) => {
         let supplierName = po.supplierName || '';
         if (po.supplier && po.supplier.toString()) {
           try {
-            const supplier = await Supplier.findById(po.supplier);
+            const supplier = await Supplier.findOne({ _id: po.supplier, owner: user._id });
             if (supplier) supplierName = supplier.name;
           } catch (err) {
             console.log('Failed to populate supplier:', err.message);
@@ -162,7 +162,7 @@ exports.getAllUsersWithData = async (req, res, next) => {
         let customerName = sale.customerName || '';
         if (sale.customer && sale.customer.toString()) {
           try {
-            const customer = await Customer.findById(sale.customer);
+            const customer = await Customer.findOne({ _id: sale.customer, owner: user._id });
             if (customer) customerName = customer.name;
           } catch (err) {
             console.log('Failed to populate customer:', err.message);
@@ -228,9 +228,7 @@ exports.getAllUsersWithData = async (req, res, next) => {
 // Delete a customer for the current user
 exports.deleteCurrentUserCustomer = async (req, res, next) => {
   try {
-    const query = isAdmin(req)
-      ? { _id: req.params.id }
-      : { _id: req.params.id, owner: req.user.id };
+    const query = { _id: req.params.id, ...(await buildOwnerFilter(req)) };
 
     const deleted = await Customer.findOneAndDelete(query);
     if (!deleted) {
@@ -246,9 +244,9 @@ exports.deleteCurrentUserCustomer = async (req, res, next) => {
 // Admin: delete a customer for a specific user
 exports.deleteUserCustomerAdmin = async (req, res, next) => {
   try {
-    if (!isAdmin(req)) {
-      return res.status(403).json({ message: 'Admin access required' });
-    }
+    return res.status(403).json({
+      message: 'Cross-tenant customer deletion is disabled by policy for multi-user data isolation'
+    });
 
     const query = { _id: req.params.id, owner: req.params.userId };
     const deleted = await Customer.findOneAndDelete(query);

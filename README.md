@@ -434,6 +434,6 @@ curl -X POST http://localhost:5000/api/sales-invoices \
     "taxPercentage": 5,
     "notes": "Corporate order"
   }'
-12837_db_user
-PwQI8lbqtLfxkfC6
-mongodb+srv://12837_db_user:PwQI8lbqtLfxkfC6@cluster0.728vmtb.mongodb.net/
+
+Local MongoDB connection example:
+MONGO_URI=mongodb://localhost:27017/POS-SYSTEM

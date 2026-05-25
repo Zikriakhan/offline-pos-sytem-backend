@@ -10,6 +10,9 @@ const PurchaseOrder = require('../models/PurchaseOrder');
 const SalesInvoice = require('../models/SalesInvoice');
 const SalesReturn = require('../models/SalesReturn');
 const Expense = require('../models/Expense');
+const { normalizeRole, getDefaultPermissionsForRole, mergePermissions } = require('../utils/rbac');
+const { getCurrentShopId } = require('../utils/tenantScope');
+const { createUniqueShopCode } = require('../utils/shopCode');
 
 exports.signup = async (req, res, next) => {
   try {
@@ -26,7 +29,11 @@ exports.signup = async (req, res, next) => {
     } = req.body;
 
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
-    const isAdminCreating = req.user && req.user.role === 'admin';
+    const normalizedRequesterRole = req.user ? normalizeRole(req.user.role) : null;
+    const elevatedCreatorRoles = ['admin', 'superadmin', 'owner'];
+    const hasUserManagementPermission = req.user && Array.isArray(req.user.permissions) && req.user.permissions.includes('User Management');
+    const isAdminCreating = req.user && (elevatedCreatorRoles.includes(normalizedRequesterRole) || hasUserManagementPermission);
+    const requestedRole = normalizeRole(req.body.role || 'user');
 
     // Basic validation
     if (!fullName || !normalizedEmail || !password || !confirmPassword) {
@@ -36,7 +43,7 @@ exports.signup = async (req, res, next) => {
       return res.status(400).json({ message: 'Passwords do not match' });
     }
     
-    // Only require terms agreement for self-signup, not for admin-created users
+    // Only require terms agreement for self-signup, not for authenticated user-management creators
     if (!isAdminCreating && (!agreeTerms || (agreeTerms !== true && agreeTerms !== 'true'))) {
       return res.status(400).json({ message: 'You must accept Terms and Conditions' });
     }
@@ -61,38 +68,47 @@ exports.signup = async (req, res, next) => {
       full_name: fullName,
       email: normalizedEmail,
       password: hashed,
-      role: isAdminCreating ? (req.body.role || 'user') : 'admin',
+      role: isAdminCreating ? requestedRole : 'user',
+      permissions: isAdminCreating ? (Array.isArray(req.body.permissions) ? req.body.permissions : []) : getDefaultPermissionsForRole('user'),
       status: 'active'
     };
 
     if (isAdminCreating) {
-      // Admin-created user: accept optional role and permissions
-      if (req.body.role) userPayload.role = req.body.role;
-      if (Array.isArray(req.body.permissions)) userPayload.permissions = req.body.permissions;
+      // Admin-created user: accept optional role and explicit permissions only
+      if (req.body.role) userPayload.role = requestedRole;
+      userPayload.permissions = Array.isArray(req.body.permissions) ? req.body.permissions : [];
       userPayload.created_by = req.user.id;
     }
 
     const user = await User.create(userPayload);
 
     // Create Shop info if any shop details are provided
+    let shop = null;
     if (shopName || phoneNumber || shopEmail || websiteLink) {
-      await Shop.create({
+      shop = await Shop.create({
         user_id: user._id,
+        shop_code: await createUniqueShopCode(),
         shop_name: shopName,
         phone_number: phoneNumber,
         shop_email: shopEmail,
         website_link: websiteLink,
         shop_logo: logo
       });
+      await User.findByIdAndUpdate(user._id, { shop_id: shop._id });
+    } else if (isAdminCreating) {
+      const currentShopId = await getCurrentShopId(req);
+      if (currentShopId) {
+        await User.findByIdAndUpdate(user._id, { shop_id: currentShopId });
+      }
     }
 
     // If admin created the user, don't auto-login as that user — return created user only
     if (isAdminCreating) {
-      return res.status(201).json({ message: 'User created', user: { id: user._id, name: user.name, email: user.email, role: user.role } });
+      return res.status(201).json({ message: 'User created', user: { id: user._id, name: user.name, email: user.email, role: user.role, shopId: shop?._id || req.user?.shopId || null } });
     }
 
     const secret = process.env.JWT_SECRET || 'change_this_secret';
-    const token = jwt.sign({ id: user._id, role: user.role }, secret, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user._id, role: user.role, shopId: shop?._id || req.user?.shopId || null }, secret, { expiresIn: '7d' });
 
     // If session middleware is configured, set session user
     if (req.session) {
@@ -102,7 +118,20 @@ exports.signup = async (req, res, next) => {
     res.status(201).json({
       message: 'Account created successfully',
       token,
-      user: { id: user._id, name: user.name, email: user.email, role: user.role }
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        shopId: shop?._id || req.user?.shopId || null,
+        shopCode: shop?.shop_code || undefined,
+        shop_name: shop?.shop_name || undefined,
+        shop_email: shop?.shop_email || undefined,
+        phone_number: shop?.phone_number || undefined,
+        website_link: shop?.website_link || undefined,
+        permissions: user.permissions || getDefaultPermissionsForRole(user.role),
+        status: user.status
+      }
     });
   } catch (err) {
     if (err.code === 11000 || (err.message && err.message.includes('duplicate'))) {
@@ -115,18 +144,33 @@ exports.signup = async (req, res, next) => {
 exports.login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
-    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const rawIdentifier = typeof email === 'string' ? email.trim() : '';
+    const normalizedIdentifier = rawIdentifier.toLowerCase();
+    const isEmailLogin = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedIdentifier);
     
     // Validate input
-    if (!normalizedEmail || !password) {
+    if (!normalizedIdentifier || !password) {
       return res.status(400).json({ message: 'Invalid email or password' });
     }
     
-    // Find user by email (email is the primary key)
-    const user = await User.findOne({ email: normalizedEmail });
+    // Support login by email (preferred) or by full name/username for legacy UX.
+    let user = null;
+    if (isEmailLogin) {
+      user = await User.findOne({ email: normalizedIdentifier });
+    } else {
+      const escapedIdentifier = rawIdentifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const exactCaseInsensitive = new RegExp(`^${escapedIdentifier}$`, 'i');
+      user = await User.findOne({
+        $or: [
+          { username: exactCaseInsensitive },
+          { full_name: exactCaseInsensitive },
+          { name: exactCaseInsensitive }
+        ]
+      });
+    }
     
     if (!user) {
-      console.warn('Login failed: user not found for email', normalizedEmail);
+      console.warn('Login failed: user not found for identifier', rawIdentifier);
       return res.status(400).json({ message: 'Invalid email or password' });
     }
     
@@ -134,7 +178,7 @@ exports.login = async (req, res, next) => {
     const isMatch = await bcrypt.compare(password, user.password);
     
     if (!isMatch) {
-      console.warn('Login failed: password mismatch for email', normalizedEmail);
+      console.warn('Login failed: password mismatch for identifier', rawIdentifier);
       return res.status(400).json({ message: 'Invalid email or password' });
     }
     
@@ -150,13 +194,28 @@ exports.login = async (req, res, next) => {
     }
     
     const secret = process.env.JWT_SECRET || 'change_this_secret';
-    const token = jwt.sign({ id: user._id, role: user.role }, secret, { expiresIn: '7d' });
+    let shop = null;
+    if (user.shop_id) {
+      shop = await Shop.findById(user.shop_id);
+      if (!shop) {
+        shop = await Shop.findOne({ user_id: user._id });
+      }
+    } else {
+      shop = await Shop.findOne({ user_id: user._id });
+    }
+
+    const token = jwt.sign({ id: user._id, role: user.role, shopId: shop?._id || null, shopCode: shop?.shop_code || null }, secret, { expiresIn: '7d' });
 
     // Get role's permissions and merge with user's custom permissions
-    const roleDoc = await Role.findOne({ role_name: user.role });
-    const rolePermissions = roleDoc ? roleDoc.permissions : [];
-    const userPermissions = Array.isArray(user.permissions) ? user.permissions : [];
-    const effectivePermissions = Array.from(new Set([...(rolePermissions || []), ...userPermissions]));
+    const normalizedRole = normalizeRole(user.role);
+    const roleDoc = await Role.findOne({ role_name: normalizedRole });
+    const rolePermissions = (roleDoc && Array.isArray(roleDoc.permissions) && roleDoc.permissions.length > 0)
+      ? roleDoc.permissions
+      : getDefaultPermissionsForRole(normalizedRole);
+    const userPermissions = Array.isArray(user.permissions) ? user.permissions : undefined;
+    const effectivePermissions = Array.isArray(userPermissions)
+      ? userPermissions
+      : rolePermissions;
 
     // If session middleware is configured, set session user id
     if (req.session) {
@@ -166,11 +225,17 @@ exports.login = async (req, res, next) => {
     res.status(200).json({
       message: 'Login successful',
       token,
-      user: { 
-        id: user._id, 
-        name: user.name, 
-        email: user.email, 
-        role: user.role, 
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: normalizedRole,
+        shopId: shop?._id || null,
+        shopCode: shop?.shop_code || undefined,
+        shop_name: shop?.shop_name || undefined,
+        shop_email: shop?.shop_email || undefined,
+        phone_number: shop?.phone_number || undefined,
+        website_link: shop?.website_link || undefined,
         permissions: effectivePermissions,
         status: user.status
       }
@@ -190,11 +255,30 @@ exports.getMe = async (req, res, next) => {
     if (!user) return res.status(404).json({ message: 'User not found' });
     
     // Get shop info
-    const shop = await Shop.findOne({ user_id: id });
+    let shop = null;
+    if (user.shop_id) {
+      shop = await Shop.findById(user.shop_id);
+      if (!shop) {
+        shop = await Shop.findOne({ user_id: id });
+      }
+    } else {
+      shop = await Shop.findOne({ user_id: id });
+    }
     
+    const normalizedRole = normalizeRole(user.role);
+    const roleDoc = await Role.findOne({ role_name: normalizedRole });
+    const rolePermissions = (roleDoc && Array.isArray(roleDoc.permissions) && roleDoc.permissions.length > 0)
+      ? roleDoc.permissions
+      : getDefaultPermissionsForRole(normalizedRole);
+    const explicitUserPermissions = Array.isArray(user.permissions) ? user.permissions : undefined;
+    const effectivePermissions = Array.isArray(explicitUserPermissions) ? explicitUserPermissions : rolePermissions;
+
     const response = {
       ...user.toObject(),
-      shop: shop || null
+      shop: shop || null,
+      shopId: user.shop_id || shop?._id || null,
+      shopCode: shop?.shop_code || undefined,
+      permissions: effectivePermissions
     };
     
     res.json(response);
@@ -236,18 +320,23 @@ exports.updateMe = async (req, res, next) => {
 
     let shop = null;
     if (Object.keys(shopData).length > 0) {
+      const existingShop = await Shop.findOne({ user_id: id }).select('shop_code');
+      const shopCode = existingShop ? existingShop.shop_code : await createUniqueShopCode();
       shop = await Shop.findOneAndUpdate(
         { user_id: id },
-        { ...shopData },
+        { ...shopData, shop_code: shopCode },
         { new: true, upsert: true }
       );
+      if (shop && String(updated.shop_id || '') !== String(shop._id)) {
+        await User.findByIdAndUpdate(id, { shop_id: shop._id });
+      }
     } else {
       shop = await Shop.findOne({ user_id: id });
     }
 
     const response = {
       message: 'Profile updated',
-      user: updated.toObject(),
+      user: { ...updated.toObject(), shopId: shop?._id || updated.shop_id || null, shopCode: shop?.shop_code || undefined },
       shop: shop || null
     };
 
@@ -259,7 +348,18 @@ exports.updateMe = async (req, res, next) => {
 
 exports.list = async (req, res, next) => {
   try {
-    const users = await User.find().select('-password');
+    const shopId = await getCurrentShopId(req);
+    const query = {};
+
+    if (req.user.role !== 'superadmin') {
+      if (shopId) {
+        query.shop_id = shopId;
+      } else {
+        query._id = req.user.id;
+      }
+    }
+
+    const users = await User.find(query).select('-password');
     res.json(users);
   } catch (err) {
     next(err);
@@ -268,7 +368,23 @@ exports.list = async (req, res, next) => {
 
 exports.get = async (req, res, next) => {
   try {
-    const user = await User.findById(req.params.id).select('-password');
+    const requesterId = String(req.user && req.user.id);
+    const targetId = req.params.id;
+
+    if (!req.user) {
+      return res.status(401).json({ message: 'Not authenticated' });
+    }
+
+    if (req.user.role !== 'superadmin' && requesterId !== targetId) {
+      const shopId = await getCurrentShopId(req);
+      const user = await User.findOne({ _id: targetId, shop_id: shopId }).select('-password');
+      if (!user) {
+        return res.status(403).json({ message: 'Forbidden: cannot access other user profiles' });
+      }
+      return res.json(user);
+    }
+
+    const user = await User.findById(targetId).select('-password');
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json(user);
   } catch (err) {
@@ -278,12 +394,36 @@ exports.get = async (req, res, next) => {
 
 exports.update = async (req, res, next) => {
   try {
-    const { name, email, password } = req.body;
+    const requesterId = String(req.user && req.user.id);
+    const targetId = req.params.id;
+
+    if (!req.user) {
+      return res.status(401).json({ message: 'Not authenticated' });
+    }
+
+    if (req.user.role !== 'superadmin') {
+      if (requesterId !== targetId) {
+        const shopId = await getCurrentShopId(req);
+        const targetUser = await User.findOne({ _id: targetId, shop_id: shopId });
+        if (!targetUser) {
+          return res.status(403).json({ message: 'Forbidden: cannot update other users' });
+        }
+      }
+    }
+
+    const { name, email, password, role, permissions, status } = req.body;
     const data = {};
     if (name) data.name = name;
     if (email) data.email = email;
     if (password) data.password = await bcrypt.hash(password, 10);
-    const updated = await User.findByIdAndUpdate(req.params.id, data, { new: true }).select('-password');
+
+    if (req.user.role === 'admin') {
+      if (role) data.role = normalizeRole(role);
+      if (Array.isArray(permissions)) data.permissions = permissions;
+      if (status) data.status = status;
+    }
+
+    const updated = await User.findByIdAndUpdate(targetId, data, { new: true }).select('-password');
     if (!updated) return res.status(404).json({ message: 'User not found' });
     res.json({ message: 'User updated', user: updated });
   } catch (err) {
@@ -293,7 +433,24 @@ exports.update = async (req, res, next) => {
 
 exports.remove = async (req, res, next) => {
   try {
-    const deleted = await User.findByIdAndDelete(req.params.id);
+    const requesterId = String(req.user && req.user.id);
+    const targetId = req.params.id;
+
+    if (!req.user) {
+      return res.status(401).json({ message: 'Not authenticated' });
+    }
+
+    if (req.user.role !== 'superadmin') {
+      if (requesterId !== targetId) {
+        const shopId = await getCurrentShopId(req);
+        const targetUser = await User.findOne({ _id: targetId, shop_id: shopId });
+        if (!targetUser) {
+          return res.status(403).json({ message: 'Forbidden: cannot delete other users' });
+        }
+      }
+    }
+
+    const deleted = await User.findByIdAndDelete(targetId);
     if (!deleted) return res.status(404).json({ message: 'User not found' });
     res.json({ message: 'User deleted' });
   } catch (err) {
@@ -304,6 +461,14 @@ exports.remove = async (req, res, next) => {
 // Admin: delete user and all owned data
 exports.removeUserWithData = async (req, res, next) => {
   try {
+    if (req.user.role !== 'superadmin') {
+      const shopId = await getCurrentShopId(req);
+      const scopedUser = await User.findOne({ _id: req.params.id, shop_id: shopId });
+      if (!scopedUser) {
+        return res.status(403).json({ message: 'Forbidden: cannot delete user from another shop' });
+      }
+    }
+
     const user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
@@ -334,6 +499,14 @@ exports.removeUserWithData = async (req, res, next) => {
 // Toggle user status (Admin only)
 exports.toggleUserStatus = async (req, res, next) => {
   try {
+    if (req.user.role !== 'superadmin') {
+      const shopId = await getCurrentShopId(req);
+      const scopedUser = await User.findOne({ _id: req.params.id, shop_id: shopId });
+      if (!scopedUser) {
+        return res.status(403).json({ message: 'Forbidden: cannot update user from another shop' });
+      }
+    }
+
     const user = await User.findById(req.params.id);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -366,6 +539,14 @@ exports.toggleUserStatus = async (req, res, next) => {
 // Deactivate user (Admin only)
 exports.deactivateUser = async (req, res, next) => {
   try {
+    if (req.user.role !== 'superadmin') {
+      const shopId = await getCurrentShopId(req);
+      const scopedUser = await User.findOne({ _id: req.params.id, shop_id: shopId });
+      if (!scopedUser) {
+        return res.status(403).json({ message: 'Forbidden: cannot deactivate user from another shop' });
+      }
+    }
+
     const user = await User.findById(req.params.id);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -384,6 +565,14 @@ exports.deactivateUser = async (req, res, next) => {
 // Activate user (Admin only)
 exports.activateUser = async (req, res, next) => {
   try {
+    if (req.user.role !== 'superadmin') {
+      const shopId = await getCurrentShopId(req);
+      const scopedUser = await User.findOne({ _id: req.params.id, shop_id: shopId });
+      if (!scopedUser) {
+        return res.status(403).json({ message: 'Forbidden: cannot activate user from another shop' });
+      }
+    }
+
     const user = await User.findById(req.params.id);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -399,7 +588,18 @@ exports.activateUser = async (req, res, next) => {
 // Admin list: DO NOT expose passwords or plainPassword
 exports.adminList = async (req, res, next) => {
   try {
-    const users = await User.find().select('-password'); // Exclude password field
+    const shopId = await getCurrentShopId(req);
+    const query = {};
+
+    if (req.user.role !== 'superadmin') {
+      if (shopId) {
+        query.shop_id = shopId;
+      } else {
+        query._id = req.user.id;
+      }
+    }
+
+    const users = await User.find(query).select('-password'); // Exclude password field
     res.json(users);
   } catch (err) {
     next(err);
@@ -449,7 +649,7 @@ exports.resetPassword = async (req, res, next) => {
     if (!user) {
       return res.status(400).json({ message: 'User not found' });
     }
-    
+        
     // Check OTP if provided
     if (otp) {
       if (user.otp !== otp) {

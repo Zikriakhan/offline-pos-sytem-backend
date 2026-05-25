@@ -9,11 +9,11 @@ const {
   getAllRoles,
   assignDefaultPermissions
 } = require('../controllers/permissionController');
-const { auth, requireOwner } = require('../middleware/auth');
+const { auth, requirePermission } = require('../middleware/auth');
 
-// All routes require authentication and owner role
+// All routes require authentication and User Management permission
 router.use(auth);
-router.use(requireOwner);
+router.use(requirePermission('User Management'));
 
 // Get all users
 router.get('/users', getAllUsers);

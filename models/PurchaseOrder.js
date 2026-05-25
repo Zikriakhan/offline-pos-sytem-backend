@@ -11,6 +11,7 @@ const PurchaseOrderItemSchema = new Schema({
 
 const PurchaseOrderSchema = new Schema({
   owner: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  shop_id: { type: Schema.Types.ObjectId, ref: 'Shop', default: null, index: true },
   supplier: { type: Schema.Types.ObjectId, ref: 'Supplier', default: null },
   supplierName: { type: String, default: '' },
   poNumber: { type: String, index: true },

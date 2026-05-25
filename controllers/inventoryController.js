@@ -1,6 +1,5 @@
 const InventoryItem = require('../models/InventoryItem');
-
-const isAdmin = (req) => req.user && req.user.role === 'admin';
+const { buildOwnerFilter, getCurrentShopId } = require('../utils/tenantScope');
 
 function buildSearchFilter(q, fields) {
 	if (!q) return {};
@@ -17,7 +16,7 @@ exports.list = async (req, res, next) => {
  		const { name, category, status } = req.query;
  		const page = Math.max(1, parseInt(req.query.page) || 1);
  		const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
- 		const baseFilter = isAdmin(req) ? {} : { owner: req.user.id };
+		const baseFilter = await buildOwnerFilter(req);
 
  		// build explicit filters if provided, otherwise fall back to q-based search
  		let filter = { ...baseFilter };
@@ -68,7 +67,7 @@ exports.list = async (req, res, next) => {
  */
 exports.get = async (req, res, next) => { 
 	try { 
-		const q = isAdmin(req) ? { _id: req.params.id } : { _id: req.params.id, owner: req.user.id }; 
+		const q = { _id: req.params.id, ...(await buildOwnerFilter(req)) };
 		const item = await InventoryItem.findOne(q); 
 		
 		if (!item) {
@@ -103,6 +102,7 @@ exports.create = async (req, res, next) => {
 
 		const item = await InventoryItem.create({
 			owner: req.user.id,
+			shop_id: await getCurrentShopId(req),
 			name,
 			category,
 			description,
@@ -131,7 +131,7 @@ exports.create = async (req, res, next) => {
  */
 exports.update = async (req, res, next) => { 
 	try { 
-		const q = isAdmin(req) ? { _id: req.params.id } : { _id: req.params.id, owner: req.user.id };
+		const q = { _id: req.params.id, ...(await buildOwnerFilter(req)) }; 
 		
 		// Validate prices if provided
 		if (req.body.sellingPrice !== undefined && req.body.sellingPrice < 0) {
@@ -172,7 +172,7 @@ exports.update = async (req, res, next) => {
  */
 exports.remove = async (req, res, next) => { 
 	try { 
-		const q = isAdmin(req) ? { _id: req.params.id } : { _id: req.params.id, owner: req.user.id };
+		const q = { _id: req.params.id, ...(await buildOwnerFilter(req)) };
 		const deleted = await InventoryItem.findOneAndDelete(q); 
 		
 		if (!deleted) {
@@ -197,7 +197,7 @@ exports.adjustStock = async (req, res, next) => {
 			return res.status(400).json({ message: 'Adjustment value is required and cannot be zero' });
 		}
 
-		const q = isAdmin(req) ? { _id: req.params.id } : { _id: req.params.id, owner: req.user.id };
+		const q = { _id: req.params.id, ...(await buildOwnerFilter(req)) };
 		const item = await InventoryItem.findOne(q);
 
 		if (!item) {
@@ -229,12 +229,13 @@ exports.adjustStock = async (req, res, next) => {
  */
 exports.getLowStockAlerts = async (req, res, next) => {
 	try {
-		const baseFilter = isAdmin(req) ? {} : { owner: req.user.id };
+		const baseFilter = await buildOwnerFilter(req);
+		const LOW_STOCK_THRESHOLD = 10;
 		
-		// Find items where current stock is at or below reorder level
+		// Find items where current stock is at or below 10
 		const lowStockItems = await InventoryItem.find({
 			...baseFilter,
-			$expr: { $lte: ['$currentStock', '$reorderLevel'] },
+			$expr: { $lte: ['$currentStock', LOW_STOCK_THRESHOLD] },
 			status: 'active'
 		}).sort({ currentStock: 1 });
 
@@ -252,7 +253,7 @@ exports.getLowStockAlerts = async (req, res, next) => {
  */
 exports.getInventoryStats = async (req, res, next) => {
 	try {
-		const baseFilter = isAdmin(req) ? {} : { owner: req.user.id };
+		const baseFilter = await buildOwnerFilter(req);
 		
 		const items = await InventoryItem.find(baseFilter);
 		
@@ -265,7 +266,7 @@ exports.getInventoryStats = async (req, res, next) => {
 			totalQuantityInStock: items.reduce((sum, item) => sum + item.currentStock, 0),
 			totalQuantitySold: items.reduce((sum, item) => sum + item.totalQuantitySold, 0),
 			averageStockLevel: items.length > 0 ? Math.round((items.reduce((sum, item) => sum + item.currentStock, 0) / items.length) * 100) / 100 : 0,
-			lowStockCount: items.filter(i => i.currentStock <= i.reorderLevel && i.status === 'active').length,
+			lowStockCount: items.filter(i => i.currentStock <= 10 && i.status === 'active').length,
 			topSellingItems: items
 				.filter(i => i.totalQuantitySold > 0)
 				.sort((a, b) => b.totalRevenue - a.totalRevenue)
@@ -311,9 +312,7 @@ exports.bulkAdjustStock = async (req, res, next) => {
 					continue;
 				}
 
-				const q = isAdmin(req) 
-					? { name: { $regex: new RegExp(`^${name}$`, 'i') } }
-					: { name: { $regex: new RegExp(`^${name}$`, 'i') }, owner: req.user.id };
+				const q = { name: { $regex: new RegExp(`^${name}$`, 'i') }, ...(await buildOwnerFilter(req)) };
 
 				const item = await InventoryItem.findOne(q);
 
@@ -354,7 +353,7 @@ exports.searchByBarcode = async (req, res, next) => {
 			return res.status(400).json({ message: 'Barcode parameter is required' });
 		}
 
-		const baseFilter = isAdmin(req) ? {} : { owner: req.user.id };
+		const baseFilter = await buildOwnerFilter(req);
 
 		// Search by barcode, SKU, or alternative barcodes
 		const item = await InventoryItem.findOne({
@@ -402,7 +401,7 @@ exports.searchByMultipleBarcodes = async (req, res, next) => {
 			return res.status(400).json({ message: 'Barcodes array is required' });
 		}
 
-		const baseFilter = isAdmin(req) ? {} : { owner: req.user.id };
+		const baseFilter = await buildOwnerFilter(req);
 		const barcodePatterns = barcodes.map(bc => new RegExp(`^${bc}$`, 'i'));
 
 		const items = await InventoryItem.find({

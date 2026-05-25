@@ -6,6 +6,7 @@ const { auth } = require('../middleware/auth');
 router.use(auth);
 router.get('/', ctrl.list);
 router.get('/:id', ctrl.get);
+router.get('/:id/transactions', ctrl.listTransactions);
 router.post('/', ctrl.create);
 router.put('/:id', ctrl.update);
 router.delete('/:id', ctrl.remove);

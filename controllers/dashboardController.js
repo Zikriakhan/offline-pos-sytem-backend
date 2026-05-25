@@ -1,11 +1,11 @@
 const SalesInvoice = require('../models/SalesInvoice');
 const Expense = require('../models/Expense');
 const Customer = require('../models/Customer');
+const { buildOwnerFilter } = require('../utils/tenantScope');
 
 exports.getDashboard = async (req, res, next) => {
   try {
-    const isAdmin = req.user && req.user.role === 'admin';
-    const ownerMatch = isAdmin ? {} : { owner: req.user.id };
+    const ownerMatch = await buildOwnerFilter(req);
 
     // Aggregate sales data
     const salesAgg = await SalesInvoice.aggregate([

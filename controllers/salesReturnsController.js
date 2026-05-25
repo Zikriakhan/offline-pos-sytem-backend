@@ -2,6 +2,8 @@ const SalesReturn = require('../models/SalesReturn');
 const SalesInvoice = require('../models/SalesInvoice');
 const InventoryItem = require('../models/InventoryItem');
 const Customer = require('../models/Customer');
+const CustomerTransaction = require('../models/CustomerTransaction');
+const { buildOwnerFilter } = require('../utils/tenantScope');
 const mongoose = require('mongoose');
 
 /**
@@ -53,7 +55,7 @@ exports.createSalesReturn = async (req, res) => {
     console.log('🔍 Fetching original sale invoice:', originalSaleId);
     const originalSale = await SalesInvoice.findOne({
       _id: originalSaleId,
-      owner: userId
+      ...(await buildOwnerFilter(req))
     }).populate('customer');
 
     if (!originalSale) {
@@ -112,10 +114,21 @@ exports.createSalesReturn = async (req, res) => {
         });
       }
 
-      // Check if return quantity exceeds available quantity
-      const availableForReturn = originalItem.quantity - (originalItem.returnedQuantity || 0);
-      if (qty > availableForReturn) {
-        console.error('❌ Return quantity exceeds available:', { qty, availableForReturn });
+      // When this endpoint is called after the invoice update flow, the invoice
+      // may already contain the newly returned quantity. Validate against the
+      // post-update total instead of treating it like a fresh return.
+      const originalQuantity = Number(originalItem.quantity || 0);
+      const totalReturnedAfterUpdate = Number(originalItem.returnedQuantity || 0);
+      const previousReturnedQuantity = Math.max(0, totalReturnedAfterUpdate - qty);
+      const availableForReturn = Math.max(0, originalQuantity - previousReturnedQuantity);
+
+      if (totalReturnedAfterUpdate > originalQuantity) {
+        console.error('❌ Return quantity exceeds available:', {
+          qty,
+          availableForReturn,
+          originalQuantity,
+          totalReturnedAfterUpdate
+        });
         return res.status(400).json({
           success: false,
           message: `Return quantity (${qty}) exceeds available quantity (${availableForReturn}) for item ${originalItem.name}`
@@ -170,7 +183,7 @@ exports.createSalesReturn = async (req, res) => {
         const month = String(date.getMonth() + 1).padStart(2, '0');
         
         // Find the last return number for this owner
-        const lastReturn = await SalesReturn.findOne({ owner: userId })
+        const lastReturn = await SalesReturn.findOne({ ...(await buildOwnerFilter(req)) })
           .sort({ createdAt: -1 })
           .select('returnNumber');
         
@@ -191,7 +204,7 @@ exports.createSalesReturn = async (req, res) => {
         
         // Check if this return number already exists for this owner
         const existingReturn = await SalesReturn.findOne({ 
-          owner: userId, 
+          ...(await buildOwnerFilter(req)), 
           returnNumber: returnNumber 
         });
         
@@ -220,12 +233,27 @@ exports.createSalesReturn = async (req, res) => {
                         (originalSale.customer && originalSale.customer.name) || 
                         'Walk-in';
     const customerId = originalSale.customer?._id || null;
+    const originalPurchaseAmount = Number(originalSale.grandTotal || 0);
+    const originalOutstandingAmount = Number(originalSale.balance || 0);
+    const returnAmount = Number(totalReturnAmount || 0);
+    const outstandingAdjustmentAmount = Math.min(originalOutstandingAmount, returnAmount);
+    const creditAmount = Math.max(0, returnAmount - originalOutstandingAmount);
+    const cashRefundAmount = creditAmount; // Excess treated as credit first (recommended approach)
+    const adjustedOutstandingAmount = Math.max(0, originalOutstandingAmount - returnAmount);
 
     console.log('👤 Customer info:', { customerId, customerName });
+    console.log('💰 Return settlement breakdown:', {
+      originalOutstanding: originalOutstandingAmount,
+      returnAmount: returnAmount,
+      outstandingAdjustment: outstandingAdjustmentAmount,
+      creditAmount: creditAmount,
+      adjustedOutstanding: adjustedOutstandingAmount
+    });
 
     // Create the sales return transaction
     const salesReturn = new SalesReturn({
       owner: userId,
+      shop_id: await getCurrentShopId(req),
       returnNumber: returnNumber, // Set explicitly to avoid validation errors
       originalSaleId: originalSale._id,
       originalInvoiceNumber: originalSale.invoiceNumber,
@@ -236,6 +264,13 @@ exports.createSalesReturn = async (req, res) => {
       subtotalReturn,
       taxReturn,
       totalReturnAmount,
+      originalPurchaseAmount,
+      originalOutstandingAmount,
+      adjustedOutstandingAmount,
+      outstandingAdjustmentAmount,
+      cashRefundAmount,
+      creditAmount,
+      adjustmentMode: 'adjust_outstanding',
       refundMethod: refundMethod || 'original_payment',
       refundStatus: 'pending',
       status: 'submitted',
@@ -272,32 +307,86 @@ exports.createSalesReturn = async (req, res) => {
     originalSale.subtotal = originalSale.items.reduce((sum, item) => sum + item.itemTotal, 0);
     originalSale.grandTotal = originalSale.subtotal - originalSale.discount + originalSale.tax;
 
-    // Apply refund to original sale received amount (if any)
-    const refundToApply = totalReturnAmount || 0;
-    if (refundToApply > 0) {
-      const prevReceived = originalSale.received || 0;
-      originalSale.received = Math.max(0, prevReceived - refundToApply);
-      // Update customer totals if applicable
+    // Apply return settlement: adjust outstanding first, then issue credit if return exceeds remaining balance
+    if (returnAmount > 0) {
+      originalSale.balance = adjustedOutstandingAmount;
+
+      // Keep customer-level totals in sync and create an auditable transaction record
       if (customerId) {
         try {
-          await Customer.findByIdAndUpdate(customerId, {
+          const updateData = {
             $inc: {
-              totalPurchases: -refundToApply,
-              outstanding: -refundToApply
+              totalPurchases: -returnAmount,
+              outstanding: -outstandingAdjustmentAmount
             }
-          });
+          };
+
+          // Add credit amount if return exceeds outstanding
+          if (creditAmount > 0) {
+            updateData.$inc.creditBalance = creditAmount;
+          }
+
+          await Customer.findOneAndUpdate({ _id: customerId, ...(await buildOwnerFilter(req)) }, updateData);
+
+          // Create transaction for outstanding adjustment
+          if (outstandingAdjustmentAmount > 0) {
+            await CustomerTransaction.create({
+              owner: userId,
+              shop_id: await getCurrentShopId(req),
+              customer: customerId,
+              type: 'sales_return_adjustment',
+              amount: outstandingAdjustmentAmount,
+              balanceBefore: originalOutstandingAmount,
+              balanceAfter: adjustedOutstandingAmount,
+              paidBy: customerName,
+              note: `Sales return ${returnNumber} adjusted against outstanding for invoice ${originalSale.invoiceNumber}`,
+              transactionDate: new Date(),
+              referenceNumber: returnNumber
+            });
+          }
+
+          // Create transaction for credit issued
+          if (creditAmount > 0) {
+            await CustomerTransaction.create({
+              owner: userId,
+              shop_id: await getCurrentShopId(req),
+              customer: customerId,
+              type: 'sales_return_credit',
+              amount: creditAmount,
+              balanceBefore: 0,
+              balanceAfter: creditAmount,
+              paidBy: customerName,
+              note: `Credit issued from return ${returnNumber}. Excess amount after adjusting outstanding balance from invoice ${originalSale.invoiceNumber}. This credit can be used for future purchases.`,
+              transactionDate: new Date(),
+              referenceNumber: returnNumber
+            });
+          }
         } catch (e) {
-          console.warn('Could not update customer totals for refund:', e.message);
+          console.warn('Could not update customer totals for sales return adjustment:', e.message);
         }
       }
-      // Mark refund processed on salesReturn
+
+      salesReturn.refundMethod = refundMethod || 'adjust_outstanding';
       salesReturn.refundStatus = 'processed';
       salesReturn.refundProcessedDate = new Date();
       salesReturn.status = 'completed';
+      salesReturn.originalPurchaseAmount = originalPurchaseAmount;
+      salesReturn.originalOutstandingAmount = originalOutstandingAmount;
+      salesReturn.adjustedOutstandingAmount = adjustedOutstandingAmount;
+      salesReturn.outstandingAdjustmentAmount = outstandingAdjustmentAmount;
+      salesReturn.cashRefundAmount = creditAmount;
+      salesReturn.creditAmount = creditAmount;
+      // Determine adjustment mode based on settlement
+      if (creditAmount > 0) {
+        salesReturn.adjustmentMode = 'adjust_outstanding_with_credit';
+      } else {
+        salesReturn.adjustmentMode = 'adjust_outstanding_only';
+      }
+    } else {
+      originalSale.balance = Math.max(0, originalSale.grandTotal - (originalSale.received || 0));
     }
 
-    // Recalculate balance and status
-    originalSale.balance = originalSale.grandTotal - (originalSale.received || 0);
+    // Recalculate status
     if (originalSale.grandTotal === 0) {
       originalSale.status = 'cancelled';
     } else if ((originalSale.received || 0) >= originalSale.grandTotal) {
@@ -340,7 +429,7 @@ exports.getAllSalesReturns = async (req, res) => {
     const { status, refundStatus, startDate, endDate, page = 1, limit = 50 } = req.query;
 
     // Build filter query
-    const filter = { owner: userId };
+    const filter = { ...(await buildOwnerFilter(req)) };
 
     if (status) {
       filter.status = status;
@@ -405,7 +494,7 @@ exports.getSalesReturnById = async (req, res) => {
 
     const salesReturn = await SalesReturn.findOne({
       _id: id,
-      owner: userId
+      ...(await buildOwnerFilter(req))
     })
       .populate('customer', 'name phone email address')
       .populate('originalSaleId')
@@ -446,7 +535,7 @@ exports.approveSalesReturn = async (req, res) => {
 
     const salesReturn = await SalesReturn.findOne({
       _id: id,
-      owner: userId
+      ...(await buildOwnerFilter(req))
     });
 
     if (!salesReturn) {
@@ -474,7 +563,7 @@ exports.approveSalesReturn = async (req, res) => {
       for (const returnItem of salesReturn.returnItems) {
         const inventoryItem = await InventoryItem.findOne({
           _id: returnItem.itemId,
-          owner: userId
+          ...(await buildOwnerFilter(req))
         });
 
         if (inventoryItem) {
@@ -528,7 +617,7 @@ exports.processRefund = async (req, res) => {
 
     const salesReturn = await SalesReturn.findOne({
       _id: id,
-      owner: userId
+      ...(await buildOwnerFilter(req))
     });
 
     if (!salesReturn) {
@@ -598,7 +687,7 @@ exports.updateSalesReturn = async (req, res) => {
 
     const salesReturn = await SalesReturn.findOne({
       _id: id,
-      owner: userId
+      ...(await buildOwnerFilter(req))
     });
 
     if (!salesReturn) {
@@ -652,7 +741,7 @@ exports.deleteSalesReturn = async (req, res) => {
 
     const salesReturn = await SalesReturn.findOne({
       _id: id,
-      owner: userId
+      ...(await buildOwnerFilter(req))
     });
 
     if (!salesReturn) {
@@ -667,7 +756,7 @@ exports.deleteSalesReturn = async (req, res) => {
       for (const returnItem of salesReturn.returnItems) {
         const inventoryItem = await InventoryItem.findOne({
           _id: returnItem.itemId,
-          owner: userId
+          ...(await buildOwnerFilter(req))
         });
 
         if (inventoryItem) {
@@ -686,7 +775,7 @@ exports.deleteSalesReturn = async (req, res) => {
       }
 
       // Restore original sale quantities
-      const originalSale = await SalesInvoice.findById(salesReturn.originalSaleId);
+      const originalSale = await SalesInvoice.findOne({ _id: salesReturn.originalSaleId, ...(await buildOwnerFilter(req)) });
       if (originalSale) {
         for (const returnItem of salesReturn.returnItems) {
           const saleItem = originalSale.items.id(returnItem.saleItemId);
@@ -740,7 +829,7 @@ exports.getSalesReturnStats = async (req, res) => {
     const { startDate, endDate } = req.query;
 
     // Build filter
-    const filter = { owner: userId };
+    const filter = { ...(await buildOwnerFilter(req)) };
     if (startDate || endDate) {
       filter.returnDate = {};
       if (startDate) filter.returnDate.$gte = new Date(startDate);

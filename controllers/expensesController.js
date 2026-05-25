@@ -1,6 +1,5 @@
 const Expense = require('../models/Expense');
-
-const isAdmin = (req) => req.user && req.user.role === 'admin';
+const { buildOwnerFilter, getCurrentShopId } = require('../utils/tenantScope');
 
 function buildSearchFilter(q, fields) {
 	if (!q) return {};
@@ -14,7 +13,7 @@ exports.list = async (req, res, next) => {
     const { title, category, paymentMethod, type } = req.query;
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
-    const baseFilter = isAdmin(req) ? {} : { owner: req.user.id };
+    const baseFilter = await buildOwnerFilter(req);
 
     // Build explicit filters if provided, otherwise fall back to q-based search
     let filter = { ...baseFilter };
@@ -34,7 +33,7 @@ exports.list = async (req, res, next) => {
     res.json({ items, total, page, limit });
   } catch (err) { next(err); }
 };
-exports.get = async (req, res, next) => { try { const q = isAdmin(req) ? { _id: req.params.id } : { _id: req.params.id, owner: req.user.id }; const e = await Expense.findOne(q); if (!e) return res.status(404).json({ message: 'Not found' }); res.json(e); } catch (err) { next(err); } };
-exports.create = async (req, res, next) => { try { const data = req.body; data.owner = req.user.id; const ex = await Expense.create(data); res.status(201).json(ex); } catch (err) { next(err); } };
-exports.update = async (req, res, next) => { try { const q = isAdmin(req) ? { _id: req.params.id } : { _id: req.params.id, owner: req.user.id }; const updated = await Expense.findOneAndUpdate(q, req.body, { new: true }); if (!updated) return res.status(404).json({ message: 'Not found' }); res.json(updated); } catch (err) { next(err); } };
-exports.remove = async (req, res, next) => { try { const q = isAdmin(req) ? { _id: req.params.id } : { _id: req.params.id, owner: req.user.id }; const deleted = await Expense.findOneAndDelete(q); if (!deleted) return res.status(404).json({ message: 'Not found' }); res.json({ message: 'Deleted' }); } catch (err) { next(err); } };
+exports.get = async (req, res, next) => { try { const q = { _id: req.params.id, ...(await buildOwnerFilter(req)) }; const e = await Expense.findOne(q); if (!e) return res.status(404).json({ message: 'Not found' }); res.json(e); } catch (err) { next(err); } };
+exports.create = async (req, res, next) => { try { const data = req.body; data.owner = req.user.id; const shopId = await getCurrentShopId(req); if (shopId) data.shop_id = shopId; const ex = await Expense.create(data); res.status(201).json(ex); } catch (err) { next(err); } };
+exports.update = async (req, res, next) => { try { const q = { _id: req.params.id, ...(await buildOwnerFilter(req)) }; const updated = await Expense.findOneAndUpdate(q, req.body, { new: true }); if (!updated) return res.status(404).json({ message: 'Not found' }); res.json(updated); } catch (err) { next(err); } };
+exports.remove = async (req, res, next) => { try { const q = { _id: req.params.id, ...(await buildOwnerFilter(req)) }; const deleted = await Expense.findOneAndDelete(q); if (!deleted) return res.status(404).json({ message: 'Not found' }); res.json({ message: 'Deleted' }); } catch (err) { next(err); } };

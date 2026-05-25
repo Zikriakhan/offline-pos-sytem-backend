@@ -11,7 +11,8 @@ const InvoiceItemSchema = new Schema({
 }, { _id: false });
 
 const SalesInvoiceSchema = new Schema({
-  owner: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  owner: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  shop_id: { type: Schema.Types.ObjectId, ref: 'Shop', default: null, index: true },
   customer: { type: Schema.Types.ObjectId, ref: 'Customer', default: null },
   customerName: { type: String, default: '' },
   invoiceNumber: { type: String, index: true },

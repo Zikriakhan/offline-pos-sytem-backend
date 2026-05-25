@@ -3,7 +3,8 @@ const mongoose = require('mongoose');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const connectDB = async () => {
-  const uri = process.env.MONGO_URI;
+  const rawUri = process.env.MONGO_URI || '';
+  const uri = rawUri.trim();
   if (!uri) {
     throw new Error('MONGO_URI is not set');
   }
@@ -16,14 +17,27 @@ const connectDB = async () => {
     return mongoose.connection;
   }
 
-  const maxRetries = Number.parseInt(process.env.MONGO_CONNECT_RETRIES || '5', 10);
-  const baseDelayMs = Number.parseInt(process.env.MONGO_CONNECT_DELAY_MS || '2000', 10);
+  const isServerless = process.env.VERCEL === '1';
+  const maxRetries = Number.parseInt(
+    process.env.MONGO_CONNECT_RETRIES || (isServerless ? '1' : '5'),
+    10
+  );
+  const baseDelayMs = Number.parseInt(
+    process.env.MONGO_CONNECT_DELAY_MS || (isServerless ? '250' : '2000'),
+    10
+  );
+  const serverSelectionTimeoutMS = Number.parseInt(
+    process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS || (isServerless ? '5000' : '10000'),
+    10
+  );
 
   let lastError;
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
       await mongoose.connect(uri, {
-        serverSelectionTimeoutMS: 10000,
+        serverSelectionTimeoutMS,
+        connectTimeoutMS: serverSelectionTimeoutMS,
+        socketTimeoutMS: serverSelectionTimeoutMS * 2,
       });
 
       console.log('MongoDB connected');

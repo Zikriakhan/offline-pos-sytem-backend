@@ -2,8 +2,7 @@ const SalesInvoice = require('../models/SalesInvoice');
 const InventoryItem = require('../models/InventoryItem');
 const Customer = require('../models/Customer');
 const { syncInventoryFromSale } = require('../utils/inventorySync');
-
-const isAdmin = (req) => req.user && req.user.role === 'admin';
+const { buildOwnerFilter, getCurrentShopId } = require('../utils/tenantScope');
 
 function buildSearchFilter(q, fields) {
 	if (!q) return {};
@@ -14,13 +13,13 @@ function buildSearchFilter(q, fields) {
 /**
  * Generate a unique invoice number
  */
-const generateInvoiceNumber = async (userId) => {
+const generateInvoiceNumber = async (req) => {
 	const today = new Date();
 	const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
 	
-	// Find the latest invoice for today with this date pattern
+	// Find the latest invoice for today within the current shop scope
 	const latestInvoice = await SalesInvoice.findOne({
-		owner: userId,
+		...(await buildOwnerFilter(req)),
 		invoiceNumber: { $regex: `^INV-${dateStr}-` }
 	}).sort({ invoiceNumber: -1 });
 	
@@ -39,7 +38,7 @@ const generateInvoiceNumber = async (userId) => {
 /**
  * Validate invoice items and prepare for sale
  */
-const validateAndPrepareInvoiceItems = async (items, userId) => {
+const validateAndPrepareInvoiceItems = async (items, req) => {
 	const preparedItems = [];
 	let subtotal = 0;
 
@@ -48,10 +47,10 @@ const validateAndPrepareInvoiceItems = async (items, userId) => {
 			throw new Error('Invalid item data. Each item must have itemId, quantity > 0, and unitPrice >= 0');
 		}
 
-		// Fetch inventory item
+		// Fetch inventory item using shop-aware owner access
 		const inventoryItem = await InventoryItem.findOne({ 
-			_id: item.itemId, 
-			owner: userId 
+			_id: item.itemId,
+			...(await buildOwnerFilter(req))
 		});
 
 		if (!inventoryItem) {
@@ -115,9 +114,9 @@ const calculateInvoiceTotals = (subtotal, discount = 0, discountPercentage = 0, 
 /**
  * Update inventory stock after sale using the comprehensive sync function
  */
-const updateInventoryStock = async (invoiceItems, ownerId) => {
+const updateInventoryStock = async (invoiceItems, req) => {
 	try {
-		const result = await syncInventoryFromSale(ownerId, invoiceItems, 'sale');
+		const result = await syncInventoryFromSale(req, invoiceItems, 'sale');
 		if (!result.success) {
 			console.error('⚠️ Inventory sync had errors:', result.errors);
 		}
@@ -131,11 +130,11 @@ const updateInventoryStock = async (invoiceItems, ownerId) => {
 /**
  * Update customer purchase data
  */
-const updateCustomerData = async (customerId, grandTotal) => {
+const updateCustomerData = async (customerId, ownerId, grandTotal) => {
 	if (!customerId) return;
 
-	await Customer.findByIdAndUpdate(
-		customerId,
+	await Customer.findOneAndUpdate(
+		{ _id: customerId, owner: ownerId },
 		{
 			$inc: {
 				totalPurchases: grandTotal,
@@ -155,7 +154,7 @@ exports.list = async (req, res, next) => {
 		const q = req.query.q || '';
 		const page = Math.max(1, parseInt(req.query.page) || 1);
 		const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
-		const baseFilter = isAdmin(req) ? {} : { owner: req.user.id };
+		const baseFilter = await buildOwnerFilter(req);
 		
 		const searchFilter = buildSearchFilter(q, ['invoiceNumber', 'status', 'items.name']);
 		const filter = Object.assign({}, baseFilter, q ? searchFilter : {});
@@ -180,7 +179,7 @@ exports.list = async (req, res, next) => {
  */
 exports.get = async (req, res, next) => {
 	try {
-		const q = isAdmin(req) ? { _id: req.params.id } : { _id: req.params.id, owner: req.user.id };
+		const q = Object.assign({ _id: req.params.id }, await buildOwnerFilter(req));
 			const invoice = await SalesInvoice.findOne(q)
 				.populate('customer', 'name contact')
 				.populate('items.itemId', 'name sellingPrice')
@@ -210,22 +209,21 @@ exports.create = async (req, res, next) => {
 		}
 
 		// Validate and prepare items
-		const { preparedItems, subtotal } = await validateAndPrepareInvoiceItems(items, req.user.id);
+		const { preparedItems, subtotal } = await validateAndPrepareInvoiceItems(items, req);
 
 		// Calculate totals
 		const totals = calculateInvoiceTotals(subtotal, discount, discountPercentage, tax, taxPercentage);
 
 		// Validate customer if provided
 		if (customer) {
-			const customerExists = await Customer.findOne({ _id: customer, owner: req.user.id });
+			const customerExists = await Customer.findOne({ _id: customer, ...(await buildOwnerFilter(req)) });
 			if (!customerExists) {
 				return res.status(404).json({ message: 'Customer not found' });
 			}
 		}
 
 		// Generate invoice number
-		const invoiceNumber = await generateInvoiceNumber(req.user.id);
-
+	const invoiceNumber = await generateInvoiceNumber(req);
 		const normalizedPaymentMethod = String(paymentMethod || 'cash').toLowerCase();
 		const receivedAmount = Math.max(0, Number(received) || 0);
 		const balanceAmount = Math.max(0, totals.grandTotal - receivedAmount);
@@ -238,6 +236,7 @@ exports.create = async (req, res, next) => {
 		// Create invoice
 		const invoice = new SalesInvoice({
 			owner: req.user.id,
+			shop_id: await getCurrentShopId(req),
 			invoiceNumber,
 			customer: customer || null,
 			customerName: customerName || null,
@@ -253,11 +252,11 @@ exports.create = async (req, res, next) => {
 		await invoice.save();
 
 		// Update inventory stock
-		await updateInventoryStock(preparedItems, req.user.id);
+		await updateInventoryStock(preparedItems, req);
 
 		// Update customer data if provided
 		if (customer) {
-			await updateCustomerData(customer, totals.grandTotal);
+			await updateCustomerData(customer, req.user.id, totals.grandTotal);
 		}
 
 		// Populate references
@@ -276,7 +275,7 @@ exports.create = async (req, res, next) => {
  */
 exports.update = async (req, res, next) => {
 	try {
-		const q = isAdmin(req) ? { _id: req.params.id } : { _id: req.params.id, owner: req.user.id };
+		const q = Object.assign({ _id: req.params.id }, await buildOwnerFilter(req));
 		const invoice = await SalesInvoice.findOne(q);
 
 		if (!invoice) {
@@ -300,8 +299,8 @@ exports.update = async (req, res, next) => {
 
 					// If items were returned, restore stock
 					if (qtyDifference > 0) {
-						await InventoryItem.findByIdAndUpdate(
-							oldItem.itemId,
+						await InventoryItem.findOneAndUpdate(
+							{ _id: oldItem.itemId, ...(await buildOwnerFilter(req)) },
 							{
 								$inc: {
 									currentStock: qtyDifference,
@@ -371,7 +370,7 @@ exports.update = async (req, res, next) => {
 
 		await invoice.save();
 
-			const updated = await SalesInvoice.findById(invoice._id)
+			const updated = await SalesInvoice.findOne(Object.assign({ _id: invoice._id }, await buildOwnerFilter(req)))
 				.populate('customer', 'name contact')
 				.populate('items.itemId', 'name')
 				.populate('owner', 'shop_name shop_email phone_number website_link shop_logo');
@@ -388,7 +387,7 @@ exports.update = async (req, res, next) => {
  */
 exports.remove = async (req, res, next) => {
 	try {
-		const q = isAdmin(req) ? { _id: req.params.id } : { _id: req.params.id, owner: req.user.id };
+		const q = Object.assign({ _id: req.params.id }, await buildOwnerFilter(req));
 		const invoice = await SalesInvoice.findOne(q);
 
 		if (!invoice) {
@@ -396,12 +395,12 @@ exports.remove = async (req, res, next) => {
 		}
 
 		// Reverse inventory stock updates using the sync function
-		await syncInventoryFromSale(req.user.id, invoice.items, 'return');
+		await syncInventoryFromSale(req, invoice.items, 'return');
 
 		// Reverse customer data if exists
 		if (invoice.customer) {
-			await Customer.findByIdAndUpdate(
-				invoice.customer,
+			await Customer.findOneAndUpdate(
+				{ _id: invoice.customer, ...(await buildOwnerFilter(req)) },
 				{
 					$inc: {
 						totalPurchases: -invoice.grandTotal,
@@ -427,10 +426,7 @@ exports.getItemSalesStats = async (req, res, next) => {
 		const itemId = req.params.itemId;
 
 		// Verify item exists
-		const item = await InventoryItem.findOne({
-			_id: itemId,
-			owner: req.user.id
-		});
+		const item = await InventoryItem.findOne(Object.assign({ _id: itemId }, await buildOwnerFilter(req)));
 
 		if (!item) {
 			return res.status(404).json({ message: 'Item not found' });
@@ -460,7 +456,7 @@ exports.getItemSalesStats = async (req, res, next) => {
  */
 exports.getAllItemsSalesStats = async (req, res, next) => {
 	try {
-		const items = await InventoryItem.find({ owner: req.user.id })
+		const items = await InventoryItem.find(await buildOwnerFilter(req))
 			.select('name totalQuantitySold totalTransactions totalRevenue currentStock sellingPrice')
 			.sort({ totalRevenue: -1 });
 
@@ -488,7 +484,7 @@ exports.getAllItemsSalesStats = async (req, res, next) => {
  */
 exports.getSalesMetrics = async (req, res, next) => {
 	try {
-		const baseFilter = { owner: req.user.id };
+		const baseFilter = await buildOwnerFilter(req);
 		const invoices = await SalesInvoice.find(baseFilter);
 
 		const metrics = {

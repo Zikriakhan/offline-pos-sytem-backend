@@ -5,10 +5,10 @@ const { syncInventoryFromPurchase } = require('../utils/inventorySync');
 const { 
   processSupplierBalanceOnCompletion, 
   adjustSupplierBalance, 
-  reverseSupplierBalance 
+  reverseSupplierBalance,
+  processSupplierPayment
 } = require('../utils/supplierBalance');
-
-const isAdmin = (req) => req.user && req.user.role === 'admin';
+const { buildOwnerFilter, getCurrentShopId } = require('../utils/tenantScope');
 
 function buildSearchFilter(q, fields) {
   if (!q) return {};
@@ -16,10 +16,9 @@ function buildSearchFilter(q, fields) {
   return { $or: or };
 }
 
-function buildIdFilter(idParam, ownerId) {
+function buildIdFilter(idParam) {
   const isObjectId = mongoose.Types.ObjectId.isValid(idParam);
-  const base = isObjectId ? { _id: idParam } : { poNumber: idParam };
-  return ownerId ? Object.assign(base, { owner: ownerId }) : base;
+  return isObjectId ? { _id: idParam } : { poNumber: idParam };
 }
 
 function normalizeItemName(name) {
@@ -113,12 +112,12 @@ exports.list = async (req, res, next) => {
     const q = req.query.q || '';
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 100));
-    const baseFilter = isAdmin(req) ? {} : { owner: req.user.id };
+    const baseFilter = await buildOwnerFilter(req);
     const searchFilter = buildSearchFilter(q, ['poNumber', 'status', 'items.name']);
     const filter = Object.assign({}, baseFilter, q ? searchFilter : {});
     
     console.log('=== PURCHASE ORDERS LIST DEBUG ===');
-    console.log('User:', req.user?.id, 'IsAdmin:', isAdmin(req));
+    console.log('User:', req.user?.id);
     console.log('Filter:', filter);
     console.log('Page:', page, 'Limit:', limit);
     
@@ -140,7 +139,10 @@ exports.list = async (req, res, next) => {
       // If supplier is a valid ObjectId, try to populate
       if (item.supplier && mongoose.Types.ObjectId.isValid(item.supplier)) {
         try {
-          const supplier = await Supplier.findById(item.supplier);
+          const supplierQuery = { _id: item.supplier };
+          if (item.shop_id) supplierQuery.shop_id = item.shop_id;
+          else if (item.owner) supplierQuery.owner = item.owner;
+          const supplier = await Supplier.findOne(supplierQuery);
           if (supplier) {
             supplierName = supplier.name;
           }
@@ -176,7 +178,7 @@ exports.list = async (req, res, next) => {
 
 exports.get = async (req, res, next) => {
   try {
-    const q = buildIdFilter(req.params.id, isAdmin(req) ? null : req.user.id);
+    const q = Object.assign(buildIdFilter(req.params.id), await buildOwnerFilter(req));
     const p = await PurchaseOrder.findOne(q).lean();
     if (!p) return res.status(404).json({ message: 'Not found' });
     
@@ -184,8 +186,11 @@ exports.get = async (req, res, next) => {
     let supplierName = p.supplierName || '';
     
     if (p.supplier && mongoose.Types.ObjectId.isValid(p.supplier)) {
-      try {
-        const supplier = await Supplier.findById(p.supplier);
+      try { 
+        const supplierQuery = { _id: p.supplier };
+        if (p.shop_id) supplierQuery.shop_id = p.shop_id;
+        else if (p.owner) supplierQuery.owner = p.owner;
+        const supplier = await Supplier.findOne(supplierQuery);
         if (supplier) {
           supplierName = supplier.name;
         }
@@ -210,6 +215,8 @@ exports.create = async (req, res, next) => {
   try {
     const data = req.body;
     data.owner = req.user.id;
+    const shopId = await getCurrentShopId(req);
+    if (shopId) data.shop_id = shopId;
 
     if (!data.poNumber) {
       data.poNumber = await getNextPoNumber(req.user.id);
@@ -218,10 +225,16 @@ exports.create = async (req, res, next) => {
     // Normalize numeric item fields and total before save
     data.items = normalizeItemsForSave(data.items);
     data.totalAmount = Number(data.totalAmount) || calculateItemsTotal(data.items);
+    const rawPaidAmount = Number(data.paid) || 0;
+    data.paid = Math.min(rawPaidAmount, data.totalAmount);
+    const extraOutstandingPayment = Math.max(
+      0,
+      Number(data.extraOutstandingPayment) || (rawPaidAmount - data.paid)
+    );
 
     // Get supplier name if supplier ID is provided
     if (data.supplier && mongoose.Types.ObjectId.isValid(data.supplier)) {
-      const supplier = await Supplier.findById(data.supplier);
+      const supplier = await Supplier.findOne({ _id: data.supplier, ...(await buildOwnerFilter(req)) });
       if (supplier) {
         data.supplierName = supplier.name;
       }
@@ -277,15 +290,21 @@ exports.create = async (req, res, next) => {
       if (data.status === 'completed') {
         try {
           await processSupplierBalanceOnCompletion(poDoc);
+
+          // If user paid more than current PO total, apply extra to old supplier outstanding.
+          if (extraOutstandingPayment > 0 && poDoc.supplier) {
+            await processSupplierPayment(poDoc.supplier, extraOutstandingPayment);
+          }
         } catch (balanceError) {
           console.error('Supplier balance update error on create:', balanceError);
         }
       }
 
       // Populate supplier for response
-      const populated = await PurchaseOrder.findById(poDoc._id).populate('supplier', 'name').lean();
+      const populated = await PurchaseOrder.findOne({ _id: poDoc._id, ...(await buildOwnerFilter(req)) }).populate('supplier', 'name').lean();
       populated.supplierName = populated.supplier?.name || populated.supplierName || 'Unknown Supplier';
       populated.supplier = populated.supplier?._id || populated.supplier;
+      populated.extraOutstandingPayment = extraOutstandingPayment;
 
       res.status(201).json(populated);
     };
@@ -309,14 +328,14 @@ exports.create = async (req, res, next) => {
 
 exports.update = async (req, res, next) => {
   try {
-    const q = buildIdFilter(req.params.id, isAdmin(req) ? null : req.user.id);
+    const q = Object.assign(buildIdFilter(req.params.id), await buildOwnerFilter(req));
     const oldPO = await PurchaseOrder.findOne(q).lean();
     
     if (!oldPO) return res.status(404).json({ message: 'Not found' });
 
     // Get supplier name if supplier ID is provided
     if (req.body.supplier && mongoose.Types.ObjectId.isValid(req.body.supplier)) {
-      const supplier = await Supplier.findById(req.body.supplier);
+      const supplier = await Supplier.findOne({ _id: req.body.supplier, ...(await buildOwnerFilter(req)) });
       if (supplier) {
         req.body.supplierName = supplier.name;
       }
@@ -327,6 +346,12 @@ exports.update = async (req, res, next) => {
       req.body.items = normalizeItemsForSave(req.body.items);
       req.body.totalAmount = Number(req.body.totalAmount) || calculateItemsTotal(req.body.items);
     }
+    const rawPaidAmount = Number(req.body.paid) || 0;
+    req.body.paid = Math.min(rawPaidAmount, Number(req.body.totalAmount || oldPO.totalAmount || 0));
+    const extraOutstandingPayment = Math.max(
+      0,
+      Number(req.body.extraOutstandingPayment) || (rawPaidAmount - req.body.paid)
+    );
 
     const updated = await PurchaseOrder.findOneAndUpdate(q, req.body, { new: true })
       .populate('supplier', 'name')
@@ -340,6 +365,11 @@ exports.update = async (req, res, next) => {
     // Adjust supplier balance when PO is updated
     try {
       await adjustSupplierBalance(oldPO, updated);
+
+      // Apply extra settlement to supplier outstanding for over-payment captured from UI.
+      if (updated.status === 'completed' && extraOutstandingPayment > 0 && updated.supplier) {
+        await processSupplierPayment(updated.supplier, extraOutstandingPayment);
+      }
     } catch (balanceError) {
       console.error('Supplier balance adjustment error on update:', balanceError);
     }
@@ -417,7 +447,7 @@ exports.update = async (req, res, next) => {
 
 exports.remove = async (req, res, next) => {
   try {
-    const q = buildIdFilter(req.params.id, isAdmin(req) ? null : req.user.id);
+    const q = Object.assign(buildIdFilter(req.params.id), await buildOwnerFilter(req));
     const deleted = await PurchaseOrder.findOneAndDelete(q);
     if (!deleted) return res.status(404).json({ message: 'Not found' });
 

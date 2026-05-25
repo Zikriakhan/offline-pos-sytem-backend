@@ -5,6 +5,7 @@
  */
 
 const InventoryItem = require('../models/InventoryItem');
+const { buildOwnerFilter } = require('./tenantScope');
 
 /**
  * Update inventory stock from purchase order items
@@ -159,12 +160,15 @@ async function syncInventoryFromPurchase(ownerId, items, operation = 'increase')
  * @param {Array} items - Sale items [{ itemId, quantity, unitPrice }]
  * @param {String} operation - 'sale' or 'return'
  */
-async function syncInventoryFromSale(ownerId, items, operation = 'sale') {
+async function syncInventoryFromSale(reqOrOwnerId, items, operation = 'sale') {
   if (!Array.isArray(items) || items.length === 0) {
     return { success: true, message: 'No items to sync' };
   }
 
   const results = { updated: [], errors: [] };
+  const baseFilter = typeof reqOrOwnerId === 'string'
+    ? { owner: reqOrOwnerId }
+    : await buildOwnerFilter(reqOrOwnerId);
 
   for (const item of items) {
     try {
@@ -175,10 +179,7 @@ async function syncInventoryFromSale(ownerId, items, operation = 'sale') {
         continue;
       }
 
-      const inventoryItem = await InventoryItem.findOne({
-        _id: itemId,
-        owner: ownerId
-      });
+      const inventoryItem = await InventoryItem.findOne(Object.assign({ _id: itemId }, baseFilter));
 
       if (!inventoryItem) {
         results.errors.push({ item: itemId, error: 'Item not found' });

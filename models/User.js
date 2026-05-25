@@ -9,6 +9,7 @@ const UserSchema = new Schema({
   password: { type: String },
   role: { type: String, default: 'user' },
   permissions: { type: [String], default: [] }, // per-user overrides
+  shop_id: { type: Schema.Types.ObjectId, ref: 'Shop', default: null },
   created_by: { type: Schema.Types.ObjectId, ref: 'User' },
   status: { type: String, default: 'active' },
   otp: { type: String, default: null },

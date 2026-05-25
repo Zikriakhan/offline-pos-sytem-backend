@@ -16,7 +16,8 @@ const ReturnItemSchema = new Schema({
 }, { _id: false });
 
 const SalesReturnSchema = new Schema({
-  owner: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  owner: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  shop_id: { type: Schema.Types.ObjectId, ref: 'Shop', default: null, index: true },
   originalSaleId: { type: Schema.Types.ObjectId, ref: 'SalesInvoice' },
   originalInvoiceNumber: { type: String, default: '' },
   customer: { type: Schema.Types.ObjectId, ref: 'Customer', default: null },
@@ -29,6 +30,13 @@ const SalesReturnSchema = new Schema({
   tax: { type: Number, default: 0 },
   taxReturn: { type: Number, default: 0 },
   totalReturnAmount: { type: Number, default: 0 },
+  originalPurchaseAmount: { type: Number, default: 0 },
+  originalOutstandingAmount: { type: Number, default: 0 },
+  adjustedOutstandingAmount: { type: Number, default: 0 },
+  outstandingAdjustmentAmount: { type: Number, default: 0 },
+  cashRefundAmount: { type: Number, default: 0 },
+  creditAmount: { type: Number, default: 0 }, // Credit issued when return exceeds outstanding
+  adjustmentMode: { type: String, default: 'adjust_outstanding' },
   refundMethod: { type: String, default: 'original_payment' },
   refundStatus: { type: String, default: 'pending' },
   processedBy: { type: Schema.Types.ObjectId, ref: 'User' },
